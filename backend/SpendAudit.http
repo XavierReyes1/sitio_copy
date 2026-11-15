@@ -1,0 +1,246 @@
+### ===========================================================================
+### SpendAudit - pruebas manuales (extensión "REST Client" de VS Code)
+### Ejecuta de arriba hacia abajo con "Send Request".
+### Escenario: DOS empresas para comprobar el aislamiento multi-empresa.
+### ===========================================================================
+@host = http://localhost:5080
+@api = {{host}}/api/v1
+
+### 0. Salud
+GET {{host}}/health
+
+
+### ---------------------------------------------------------------------------
+### EMPRESA A: Ferretería
+### ---------------------------------------------------------------------------
+
+### 1A. Registrar empresa A (devuelve el token del Admin)
+# @name registroA
+POST {{api}}/auth/registro-empresa
+Content-Type: application/json
+
+{
+  "nombreRazonSocial": "Ferretería El Buen Precio",
+  "rtn": "08011999123456",
+  "adminNombre": "Ana Gerente",
+  "adminEmail": "ana@ferreteria.hn",
+  "adminPassword": "Clave1234"
+}
+
+###
+@tokenAdminA = {{registroA.response.body.$.token}}
+
+### 2A. Login del admin A (comprueba el JWT)
+# @name loginA
+POST {{api}}/auth/login
+Content-Type: application/json
+
+{ "email": "ana@ferreteria.hn", "password": "Clave1234" }
+
+### 3A. Crear puesto "Vendedor"
+# @name puestoA
+POST {{api}}/puestos
+Authorization: Bearer {{tokenAdminA}}
+Content-Type: application/json
+
+{ "nombre": "Vendedor" }
+
+###
+@puestoVendedorId = {{puestoA.response.body.$.id}}
+
+### 4A. Crear un empleado con ese puesto
+POST {{api}}/usuarios
+Authorization: Bearer {{tokenAdminA}}
+Content-Type: application/json
+
+{
+  "nombreCompleto": "Carlos Vendedor",
+  "email": "carlos@ferreteria.hn",
+  "password": "Clave1234",
+  "rol": "Empleado",
+  "puestoId": "{{puestoVendedorId}}"
+}
+
+### 5A. Crear un auditor
+POST {{api}}/usuarios
+Authorization: Bearer {{tokenAdminA}}
+Content-Type: application/json
+
+{
+  "nombreCompleto": "Laura Auditora",
+  "email": "laura@ferreteria.hn",
+  "password": "Clave1234",
+  "rol": "Auditor"
+}
+
+### 6A. Definir la política: vigencia 15 días, tope L 1,000 al Vendedor, términos prohibidos
+PUT {{api}}/politicas
+Authorization: Bearer {{tokenAdminA}}
+Content-Type: application/json
+
+{
+  "diasVigenciaMaxima": 15,
+  "topes": [ { "puestoId": "{{puestoVendedorId}}", "topeDiarioHNL": 1000 } ],
+  "terminosRestringidos": ["alcohol", "cerveza", "licor"]
+}
+
+### 7A. Consultar la política
+GET {{api}}/politicas
+Authorization: Bearer {{tokenAdminA}}
+
+
+### ---------------------------------------------------------------------------
+### EL EMPLEADO (Carlos) CARGA Y LIQUIDA
+### ---------------------------------------------------------------------------
+
+### 8. Login de Carlos
+# @name loginCarlos
+POST {{api}}/auth/login
+Content-Type: application/json
+
+{ "email": "carlos@ferreteria.hn", "password": "Clave1234" }
+
+###
+@tokenCarlos = {{loginCarlos.response.body.$.token}}
+
+### 9. Subir una factura PDF (cambia la ruta por un PDF real; los campos son opcionales)
+# @name subida
+POST {{api}}/gastos/borrador
+Authorization: Bearer {{tokenCarlos}}
+Content-Type: multipart/form-data; boundary=----SpendAudit
+
+------SpendAudit
+Content-Disposition: form-data; name="archivo"; filename="factura1.pdf"
+Content-Type: application/pdf
+
+< ./factura1.pdf
+------SpendAudit
+Content-Disposition: form-data; name="numeroFactura"
+
+000-001-01-00000123
+------SpendAudit
+Content-Disposition: form-data; name="proveedorRTN"
+
+08019999000011
+------SpendAudit
+Content-Disposition: form-data; name="fechaEmision"
+
+2026-11-05
+------SpendAudit
+Content-Disposition: form-data; name="montoTotal"
+
+450.00
+------SpendAudit--
+
+###
+@comprobanteId = {{subida.response.body.$.id}}
+
+### 10. Ver mi álbum de borradores
+GET {{api}}/gastos/album
+Authorization: Bearer {{tokenCarlos}}
+
+### 11. Corregir un dato del borrador
+PUT {{api}}/gastos/{{comprobanteId}}
+Authorization: Bearer {{tokenCarlos}}
+Content-Type: application/json
+
+{
+  "numeroFactura": "000-001-01-00000123",
+  "proveedorRTN": "08019999000011",
+  "fechaEmision": "2026-11-05",
+  "montoTotal": 450.00,
+  "isv": 58.70
+}
+
+### 12. LIQUIDAR LOTE -> semáforo
+# @name lote
+POST {{api}}/gastos/liquidar-lote
+Authorization: Bearer {{tokenCarlos}}
+Content-Type: application/json
+
+{
+  "descripcion": "Gira a San Pedro Sula",
+  "comprobanteIds": ["{{comprobanteId}}"]
+}
+
+###
+@loteId = {{lote.response.body.$.loteId}}
+
+### 13. Detalle del lote (con hallazgos)
+GET {{api}}/gastos/lotes/{{loteId}}
+Authorization: Bearer {{tokenCarlos}}
+
+### 14. Intentar editar un comprobante ya liquidado -> 409
+PUT {{api}}/gastos/{{comprobanteId}}
+Authorization: Bearer {{tokenCarlos}}
+Content-Type: application/json
+
+{ "montoTotal": 1.00 }
+
+
+### ---------------------------------------------------------------------------
+### EMPRESA B + PRUEBAS DE AISLAMIENTO Y SEGURIDAD
+### ---------------------------------------------------------------------------
+
+### 1B. Registrar empresa B
+# @name registroB
+POST {{api}}/auth/registro-empresa
+Content-Type: application/json
+
+{
+  "nombreRazonSocial": "Clínica Dental Sonrisas",
+  "rtn": "05011988654321",
+  "adminNombre": "Bruno Director",
+  "adminEmail": "bruno@sonrisas.hn",
+  "adminPassword": "Clave1234"
+}
+
+###
+@tokenAdminB = {{registroB.response.body.$.token}}
+
+### 15. AISLAMIENTO: el admin B pide el comprobante de la empresa A -> 404
+GET {{api}}/gastos/{{comprobanteId}}
+Authorization: Bearer {{tokenAdminB}}
+
+### 16. AISLAMIENTO: el admin B pide el lote de la empresa A -> 404
+GET {{api}}/gastos/lotes/{{loteId}}
+Authorization: Bearer {{tokenAdminB}}
+
+### 17. AISLAMIENTO: B lista sus usuarios -> solo ve a Bruno
+GET {{api}}/usuarios
+Authorization: Bearer {{tokenAdminB}}
+
+### 18. AISLAMIENTO: B ve su propia política (vacía), no la de A
+GET {{api}}/politicas
+Authorization: Bearer {{tokenAdminB}}
+
+### 19. SEGURIDAD: sin token -> 401
+GET {{api}}/gastos/album
+
+### 20. SEGURIDAD: un Empleado no administra usuarios -> 403
+GET {{api}}/usuarios
+Authorization: Bearer {{tokenCarlos}}
+
+### 21. VALIDACIÓN: errores FluentValidation -> 400 con [{propertyName, errorMessage}]
+POST {{api}}/auth/registro-empresa
+Content-Type: application/json
+
+{
+  "nombreRazonSocial": "",
+  "rtn": "123",
+  "adminNombre": "X",
+  "adminEmail": "no-es-correo",
+  "adminPassword": "corta"
+}
+
+### 22. CONFLICTO: RTN repetido -> 409
+POST {{api}}/auth/registro-empresa
+Content-Type: application/json
+
+{
+  "nombreRazonSocial": "Otra Ferretería",
+  "rtn": "08011999123456",
+  "adminNombre": "Zoe",
+  "adminEmail": "zoe@otra.hn",
+  "adminPassword": "Clave1234"
+}
